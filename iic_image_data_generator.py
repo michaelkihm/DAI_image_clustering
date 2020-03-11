@@ -19,7 +19,7 @@ class IIC_ImageDataGenerator(keras.utils.Sequence):
         @param heads number of heads
         @param batch_size batch size
         @param crop_image if value !=0, images are croped by given number of pixel
-        @param image size: To which size should each image be resized
+        @image size: To which size should each image be resized
         """
         self.generator = keras.preprocessing.image.ImageDataGenerator(rotation_range=15,
                                                                       # width_shift_range=0.1,

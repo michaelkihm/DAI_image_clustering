@@ -1,5 +1,5 @@
 import numpy as np
-import cv2 as cv 
+import cv2 as cv
 import vgg
 
 from tensorflow import keras
@@ -8,7 +8,7 @@ from typing import Tuple, List
 
 from utils import AccuracyCallback, lr_schedule, unsupervised_labels
 
-#pylint: disable=unused-argument
+# pylint: disable=unused-argument
 
 
 class IIC_clustering:
@@ -20,7 +20,9 @@ class IIC_clustering:
                  z_dimension: int,
                  class_list: List = (''),
                  crop_image: int = 4,
-                 input_shape: Tuple = (28, 28, 3)):
+                 input_shape: Tuple = (28, 28, 3),
+                 CNN_base: str = 'ResNet',
+                 mnist: bool = False,):
         """
         @brief Contains the encoder model, the loss function,
             loading of datasets, train and evaluation routines
@@ -33,6 +35,8 @@ class IIC_clustering:
         @param class_list list or tuple of classes. Only required for labeled data
         @param crop_image Defines the pixel of which the image has to be cropped
         @param input_shape original input shape of the data. The image will size will be reduced if value for crop_image > 0.
+        @param CNN_base base CNN to create feature space. Values: 'Vgg', 'ResNet'
+        @param mnist Do we train on mnist dataset. If yes, keras data can be used to evaluate accuracy
         """
         self._model = None
         self.x_test = None
@@ -47,12 +51,16 @@ class IIC_clustering:
         self.epochs = epochs
         self._class_list = class_list
         self._z_dimension = z_dimension
+        self._cnn_base = CNN_base
+        self.mnsit = mnist
 
         self.compute_image_size(input_shape)
         self.train_gen = IIC_ImageDataGenerator(
             self._path, self._class_list, heads=self._heads, batch_size=self._batch_size, image_size=self._uncroped_image_size, crop_image=self._crop_image)
         self.build_model()
-        self.load_eval_dataset()
+
+        if self.mnsit:
+            self.load_mnist_eval_dataset()
 
         self._steps_per_epoch = self.train_gen.get_dataset_size(
         )//self.train_gen.get_batch_size()
@@ -62,7 +70,8 @@ class IIC_clustering:
         @brief Build the n_heads of the IIC model
         """
         # construct CNN model
-        self.CNN = vgg.VGG(vgg.cfg['F'], self._input_shape).model
+        # vgg.VGG(vgg.cfg['F'], self._input_shape).model
+        self.CNN = self.build_base_model()
         inputs = keras.layers.Input(shape=self._input_shape, name='x')
         x = self.CNN(inputs)
         x = keras.layers.Flatten()(x)
@@ -74,10 +83,51 @@ class IIC_clustering:
             outputs.append(keras.layers.Dense(self._z_dimension,
                                               activation='softmax',
                                               name=name)(x))
-        self._model = keras.models.Model(inputs, outputs, name='IIC')
+        self._model = keras.models.Model([inputs], outputs, name='IIC')
         optimizer = keras.optimizers.Adam(lr=1e-3)
         self._model.compile(optimizer=optimizer, loss=self.mi_loss)
         self._model.summary()
+
+    def build_base_model(self):
+        """
+        @brief builds CNN base model for IIC model
+        @remark ResNet is pretrained ResNet model trained on imageNet
+        """
+        if self._cnn_base.lower() == 'vgg':
+            return vgg.VGG(vgg.cfg['F'], self._input_shape).model
+        elif self._cnn_base.lower() == 'resnet':
+            assert self._input_shape >= (200, 200, 3), error_msg['ResNetShape']
+            base_model = keras.applications.ResNet50(
+                weights="imagenet", include_top=False, input_shape=self._input_shape)
+            # only train conv5 block
+            for layer in base_model.layers:
+                if "conv5_" in layer.name:
+                    break
+                layer.trainable = False
+            return base_model
+        elif self._cnn_base.lower() == 'test':
+            model = keras.models.Sequential()
+            model.add(keras.layers.Conv2D(32, kernel_size=(5, 5),
+                                          activation='relu',
+                                          input_shape=self._input_shape))
+            model.add(keras.layers.Conv2D(64, (3, 3), activation='relu'))
+            model.add(keras.layers.MaxPooling2D(pool_size=(2, 2)))
+            model.add(keras.layers.Dropout(0.25))
+            model.add(keras.layers.Conv2D(128, (3, 3), activation='relu'))
+            model.add(keras.layers.MaxPooling2D(pool_size=(2, 2)))
+            model.add(keras.layers.Dropout(0.25))
+            return model
+        elif self._cnn_base.lower() == 'mini':
+            assert self._input_shape >= (200, 200, 3), error_msg['MiniNet']
+            base_model = keras.applications.mobilenet.MobileNet(
+                input_shape=self._input_shape, alpha=1.0, depth_multiplier=1, dropout=1e-3, include_top=False, weights='imagenet')
+            for layer in base_model.layers:
+                if "conv_dw_9" in layer.name:
+                    break
+                layer.trainable = False 
+            return base_model
+        else:
+            raise NameError('Unknown CNN model')
 
     def fit(self):
         """
@@ -85,11 +135,15 @@ class IIC_clustering:
             accuracy computation, and learning rate
             scheduler callbacks
         """
-        accuracy = AccuracyCallback(self)
         lr_scheduler = keras.callbacks.LearningRateScheduler(lr_schedule,
                                                              verbose=1)
-        callbacks = [accuracy, lr_scheduler]
-        self._model.fit_generator(generator=self.train_gen,
+        if self.mnsit:
+            accuracy = AccuracyCallback(self)
+            callbacks = [accuracy, lr_scheduler]
+        else:
+            callbacks = [lr_scheduler]
+
+        self._model.fit(self.train_gen,
                                   steps_per_epoch=self._steps_per_epoch,
                                   use_multiprocessing=False,
                                   epochs=self.epochs,
@@ -175,24 +229,25 @@ class IIC_clustering:
             #     print("Saving weights... ", path)
             #     self._model.save_weights(path)
 
-    def load_eval_dataset(self):
+    def load_mnist_eval_dataset(self):
         """
         @brief Pre-load test data for evaluation
         @remark Only for testing with MNIST
         """
 
         (_, _), (x_test, self.y_test) = keras.datasets.mnist.load_data()
-        #image_size = x_test.shape[1]
+        # image_size = x_test.shape[1]
         x_test_rgb = np.zeros(shape=(x_test.shape[0], 24, 24, 3))
         for i in range(len(x_test)):
-            x_test_rgb[i] = cv.resize(self.to_rgb(x_test[i, :, :, np.newaxis]),(24,24))
+            x_test_rgb[i] = cv.resize(self.to_rgb(
+                x_test[i, :, :, np.newaxis]), (24, 24))
         # x_test = np.reshape(x_test,[-1, image_size, image_size, 1])
         # x_test = x_test.astype('float32') / 255
         # x_eval = np.zeros([x_test.shape[0], *self.train_gen.get_input_shape()])#*self.train_gen.input_shape])
         # for i in range(x_eval.shape[0]):
         #     x_eval[i] = center_crop(x_test[i])
 
-        #self.x_test = x_eval
+        # self.x_test = x_eval
         self.x_test = np.array(x_test_rgb)
 
     def to_rgb(self, im):
@@ -211,9 +266,9 @@ class IIC_clustering:
         """
         chanels = 3
         if self._crop_image != 0:
-            assert input_shape[0] > self._crop_image and input_shape[1] > self._crop_image, "Crop size is largen than inuput shape"
+            assert input_shape[0] > self._crop_image and input_shape[1] > self._crop_image, error_msg['large_crop']
             self._input_shape = (*tuple((input_shape[i]-self._crop_image)
-                                      for i in range(2)),chanels)
+                                        for i in range(2)), chanels)
         else:
             self._input_shape = input_shape
         self._image_size = self._input_shape[0:-1]
@@ -223,3 +278,10 @@ class IIC_clustering:
     @property
     def model(self):
         return self._model
+
+
+error_msg = {
+    'ResNetShape': "Image shape has to be >200,200 for ResNet. Do not forget that cropping does reduce image size",
+    'large_crop': "Crop size is larger than inuput shape",
+    'MiniNet': "Image shape has to be >200,200 for MobileNet. Do not forget that cropping does reduce image size",
+}
