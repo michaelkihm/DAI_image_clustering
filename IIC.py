@@ -1,76 +1,87 @@
-#import tensorflow as tf
 import numpy as np
-
+import cv2 as cv 
 import vgg
 
 from tensorflow import keras
-#from data import IIC_ImageDataGenerator
-from data_generator import DataGenerator
+from iic_image_data_generator import IIC_ImageDataGenerator
+from typing import Tuple, List
 
-from utils import AccuracyCallback, lr_schedule, unsupervised_labels, center_crop
+from utils import AccuracyCallback, lr_schedule, unsupervised_labels
+
+#pylint: disable=unused-argument
 
 
 class IIC_clustering:
     def __init__(self,
-                 input_shape,
-                 path,
-                 heads,
-                 batch_size,
-                 epochs,
-                 classes):
-        """Contains the encoder model, the loss function,
+                 path: str,
+                 heads: int,
+                 batch_size: int,
+                 epochs: int,
+                 z_dimension: int,
+                 class_list: List = (''),
+                 crop_image: int = 4,
+                 input_shape: Tuple = (28, 28, 3)):
+        """
+        @brief Contains the encoder model, the loss function,
             loading of datasets, train and evaluation routines
             to implement IIC unsupervised clustering
-
-        Arguments:
-            args : Command line arguments to indicate choice
-                of batch size, number of heads, folder to save
-                weights file, weights file name, etc
-            backbone (Model): IIC Encoder backbone (eg VGG):
+        @param path Path to image dataset
+        @param heads number of heads
+        @param batch size batch size
+        @paramepochs number of epochs to train
+        @param z_dimension output dimension of clustering layer
+        @param class_list list or tuple of classes. Only required for labeled data
+        @param crop_image Defines the pixel of which the image has to be cropped
+        @param input_shape original input shape of the data. The image will size will be reduced if value for crop_image > 0.
         """
-        #self.args = args
-        #self.backbone = backbone
         self._model = None
         self.x_test = None
-        self.n_labels = 10
-
-        # self.load_eval_dataset()
-        self.accuracy = 0
-        self.input_shape = input_shape
-        self.path = path
-        self.heads = heads
-        self.batch_size = batch_size
+        self._input_shape = None  # see compute_image_size
+        self._uncroped_image_size = None  # see compute_image_size
+        self._image_size = None  # see compute_image_size
+        self._accuracy = 0
+        self._crop_image = crop_image
+        self._path = path
+        self._heads = heads
+        self._batch_size = batch_size
         self.epochs = epochs
-        self.classes = classes
+        self._class_list = class_list
+        self._z_dimension = z_dimension
 
-        self.train_gen = DataGenerator(
-            2, shuffle=True, siamese=True, batch_size=self.batch_size)
+        self.compute_image_size(input_shape)
+        self.train_gen = IIC_ImageDataGenerator(
+            self._path, self._class_list, heads=self._heads, batch_size=self._batch_size, image_size=self._uncroped_image_size, crop_image=self._crop_image)
         self.build_model()
         self.load_eval_dataset()
 
+        self._steps_per_epoch = self.train_gen.get_dataset_size(
+        )//self.train_gen.get_batch_size()
+
     def build_model(self):
-        """Build the n_heads of the IIC model
+        """
+        @brief Build the n_heads of the IIC model
         """
         # construct CNN model
-        self.CNN = vgg.VGG(vgg.cfg['F'], self.input_shape).model
-
-        inputs = keras.layers.Input(shape=self.input_shape, name='x')
+        self.CNN = vgg.VGG(vgg.cfg['F'], self._input_shape).model
+        inputs = keras.layers.Input(shape=self._input_shape, name='x')
         x = self.CNN(inputs)
         x = keras.layers.Flatten()(x)
+
         # number of output heads
         outputs = []
-        for i in range(self.heads):
+        for i in range(self._heads):
             name = "z_head%d" % i
-            outputs.append(keras.layers.Dense(self.n_labels,
+            outputs.append(keras.layers.Dense(self._z_dimension,
                                               activation='softmax',
                                               name=name)(x))
-        self._model = keras.models.Model(inputs, outputs, name='encoder')
+        self._model = keras.models.Model(inputs, outputs, name='IIC')
         optimizer = keras.optimizers.Adam(lr=1e-3)
         self._model.compile(optimizer=optimizer, loss=self.mi_loss)
         self._model.summary()
 
     def fit(self):
-        """Train function uses the data generator,
+        """
+        @brief Train function uses the data generator,
             accuracy computation, and learning rate
             scheduler callbacks
         """
@@ -79,15 +90,16 @@ class IIC_clustering:
                                                              verbose=1)
         callbacks = [accuracy, lr_scheduler]
         self._model.fit_generator(generator=self.train_gen,
+                                  steps_per_epoch=self._steps_per_epoch,
                                   use_multiprocessing=False,
                                   epochs=self.epochs,
                                   callbacks=callbacks,
-                                  workers=4,
-                                  shuffle=True)
+                                  workers=4,)
 
     def mi_loss(self, y_true, y_pred):
-        """Mutual information loss computed from the joint
-           distribution matrix and the marginals
+        """
+        @brief Mutual information loss computed from the joint
+                distribution matrix and the marginals
 
         @param y_true (tensor): Not used because of unsupervised
                 learning. However, is required to be used with fit method from
@@ -96,7 +108,7 @@ class IIC_clustering:
         @param y_pred (tensor): stack of softmax predictions for
                 the latent vectors (Z and Zbar)
         """
-        size = self.batch_size
+        size = self._batch_size
         n_labels = y_pred.shape[-1]
         # lower half is Z
         Z = y_pred[0: size, :]
@@ -125,16 +137,17 @@ class IIC_clustering:
         neg_mi = keras.backend.sum(
             (P * (keras.backend.log(Pi) + keras.backend.log(Pj) - keras.backend.log(P))))
         # each head contribute 1/n_heads to the total loss
-        return neg_mi/self.heads
+        return neg_mi/self._heads
 
     def eval(self):
-        """Evaluate the accuracy of the current model weights
+        """
+        @brief Evaluate the accuracy of the current model weights
         """
         y_pred = self._model.predict(self.x_test)
         print("")
         # accuracy per head
-        for head in range(self.heads):
-            if self.heads == 1:
+        for head in range(self._heads):
+            if self._heads == 1:
                 y_head = y_pred
             else:
                 y_head = y_pred[head]
@@ -142,12 +155,12 @@ class IIC_clustering:
 
             accuracy = unsupervised_labels(list(self.y_test),
                                            list(y_head),
-                                           self.n_labels,
-                                           self.n_labels)
+                                           self._z_dimension,
+                                           self._z_dimension)
             info = "Head %d accuracy: %0.2f%%"
-            if self.accuracy > 0:
+            if self._accuracy > 0:
                 info += ", Old best accuracy: %0.2f%%"
-                data = (head, accuracy, self.accuracy)
+                data = (head, accuracy, self._accuracy)
             else:
                 data = (head, accuracy)
             print(info % data)
@@ -163,18 +176,49 @@ class IIC_clustering:
             #     self._model.save_weights(path)
 
     def load_eval_dataset(self):
-        """Pre-load test data for evaluation
         """
-        
-        (_, _), (x_test, self.y_test) = keras.datasets.mnist.load_data()
-        image_size = x_test.shape[1]
-        x_test = np.reshape(x_test,[-1, image_size, image_size, 1])
-        x_test = x_test.astype('float32') / 255
-        x_eval = np.zeros([x_test.shape[0], *self.train_gen.input_shape])
-        for i in range(x_eval.shape[0]):
-            x_eval[i] = center_crop(x_test[i])
+        @brief Pre-load test data for evaluation
+        @remark Only for testing with MNIST
+        """
 
-        self.x_test = x_eval
+        (_, _), (x_test, self.y_test) = keras.datasets.mnist.load_data()
+        #image_size = x_test.shape[1]
+        x_test_rgb = np.zeros(shape=(x_test.shape[0], 24, 24, 3))
+        for i in range(len(x_test)):
+            x_test_rgb[i] = cv.resize(self.to_rgb(x_test[i, :, :, np.newaxis]),(24,24))
+        # x_test = np.reshape(x_test,[-1, image_size, image_size, 1])
+        # x_test = x_test.astype('float32') / 255
+        # x_eval = np.zeros([x_test.shape[0], *self.train_gen.get_input_shape()])#*self.train_gen.input_shape])
+        # for i in range(x_eval.shape[0]):
+        #     x_eval[i] = center_crop(x_test[i])
+
+        #self.x_test = x_eval
+        self.x_test = np.array(x_test_rgb)
+
+    def to_rgb(self, im):
+        # I think this will be slow
+        w, h, _ = im.shape
+        ret = np.empty((w, h, 3), dtype=np.float32)
+        ret[:, :, 0] = im[:, :, 0]
+        ret[:, :, 1] = im[:, :, 0]
+        ret[:, :, 2] = im[:, :, 0]
+        return ret/255.
+
+    def compute_image_size(self, input_shape: Tuple):
+        """
+        @brief computes the final shape of the input data. 
+                Image size will change if cropping is enabled
+        """
+        chanels = 3
+        if self._crop_image != 0:
+            assert input_shape[0] > self._crop_image and input_shape[1] > self._crop_image, "Crop size is largen than inuput shape"
+            self._input_shape = (*tuple((input_shape[i]-self._crop_image)
+                                      for i in range(2)),chanels)
+        else:
+            self._input_shape = input_shape
+        self._image_size = self._input_shape[0:-1]
+        self._uncroped_image_size = tuple(
+            (i + self._crop_image) for i in self._image_size)
 
     @property
     def model(self):
