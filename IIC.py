@@ -229,16 +229,6 @@ class IIC_clustering:
             else:
                 data = (head, accuracy)
             print(info % data)
-            # if accuracy improves during training,
-            # save the model weights on a file
-            # if accuracy > self.accuracy \
-            #         and self.args.save_weights is not None:
-            #     self.accuracy = accuracy
-            #     folder = self.args.save_dir
-            #     os.makedirs(folder, exist_ok=True)
-            #     path = os.path.join(folder, self.args.save_weights)
-            #     print("Saving weights... ", path)
-            #     self._model.save_weights(path)
 
     def load_mnist_eval_dataset(self):
         """
@@ -252,13 +242,7 @@ class IIC_clustering:
         for i in range(len(x_test)):
             x_test_rgb[i] = cv.resize(self.to_rgb(
                 x_test[i, :, :, np.newaxis]), (24, 24))
-        # x_test = np.reshape(x_test,[-1, image_size, image_size, 1])
-        # x_test = x_test.astype('float32') / 255
-        # x_eval = np.zeros([x_test.shape[0], *self.train_gen.get_input_shape()])#*self.train_gen.input_shape])
-        # for i in range(x_eval.shape[0]):
-        #     x_eval[i] = center_crop(x_test[i])
 
-        # self.x_test = x_eval
         self.x_test = np.array(x_test_rgb)
 
     def to_rgb(self, im):
