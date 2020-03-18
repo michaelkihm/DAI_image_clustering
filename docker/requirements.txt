@@ -1,0 +1,5 @@
+# pip dependencies
+numpy
+tensorflow
+pillow
+opencv-python
