@@ -1,12 +1,21 @@
 import numpy as np
 import cv2 as cv
 import vgg
+import pickle
+import logging
+import time
+import os
 
+from datetime import datetime
 from tensorflow import keras
 from iic_image_data_generator import IIC_ImageDataGenerator
 from typing import Tuple, List
-
 from utils import AccuracyCallback, lr_schedule, unsupervised_labels
+
+
+def log_info(message: str):
+    logging.info("%s - %s", message,
+                 time.strftime("%D-%H:%M:%S", time.localtime()))
 
 # pylint: disable=unused-argument
 
@@ -23,7 +32,8 @@ class IIC_clustering:
                  input_shape: Tuple = (28, 28, 3),
                  CNN_base: str = 'ResNet',
                  mnist: bool = False,
-                 aux_cluster=True):
+                 aux_cluster=True,
+                 save_dir='save_dir'):
         """
         @brief Contains the encoder model, the loss function,
             loading of datasets, train and evaluation routines
@@ -39,6 +49,7 @@ class IIC_clustering:
         @param CNN_base base CNN to create feature space. Values: 'Vgg', 'ResNet'
         @param mnist Do we train on mnist dataset. If yes, keras data can be used to evaluate accuracy
         @param aux_cluster enable auxiliary clustering layer
+        @save_dir directory to save training stats
         """
         self._model = None
         self.x_test = None
@@ -56,6 +67,7 @@ class IIC_clustering:
         self._cnn_base = CNN_base
         self._mnsit = mnist
         self._aux_cluster = aux_cluster
+        self._save_dir = save_dir
 
         assert self._mnsit != self._aux_cluster, error_msg['AuxCluster']
 
@@ -69,6 +81,20 @@ class IIC_clustering:
 
         self._steps_per_epoch = self.train_gen.get_dataset_size(
         )//self.train_gen.get_batch_size()
+
+        # set up save directory
+        self._save_dir = os.path.realpath(self._save_dir)
+        if not os.path.exists(self._save_dir):
+            os.makedirs(self._save_dir)
+        # set logging directory
+        log_file_path = os.path.join(self._save_dir, 'train_log.log')
+        try:
+            os.remove(log_file_path)
+        except OSError:
+            pass
+        logging.basicConfig(filename=log_file_path, level=logging.INFO)
+        log_info("Shape {shape} , data {data}, clusters {clus}".format(
+            shape=self._input_shape, data=self._path, clus=self._z_dimension))
 
     def build_model(self):
         """
@@ -87,7 +113,7 @@ class IIC_clustering:
             outputs.append(keras.layers.Dense(self._z_dimension,
                                               activation='softmax',
                                               name=name)(x))
-        #add aux layer
+        # add aux layer
         if self._aux_cluster:
             name = "aux_cluster_layer"
             outputs.append(keras.layers.Dense(self._z_dimension*3,
@@ -146,20 +172,28 @@ class IIC_clustering:
             accuracy computation, and learning rate
             scheduler callbacks
         """
+        log_info("Start training")
         lr_scheduler = keras.callbacks.LearningRateScheduler(lr_schedule,
                                                              verbose=1)
+        checkpointer = keras.callbacks.ModelCheckpoint(
+            self._save_dir+"/model_{epoch:02d}.h5", monitor='val_loss', verbose=0, save_best_only=False, save_weights_only=False, mode='auto', period=100)
         if self._mnsit:
             accuracy = AccuracyCallback(self)
-            callbacks = [accuracy, lr_scheduler]
+            callbacks = [accuracy, lr_scheduler,checkpointer]
         else:
-            callbacks = [lr_scheduler]
+            callbacks = [lr_scheduler,checkpointer]
 
-        self._model.fit(self.train_gen,
-                        steps_per_epoch=self._steps_per_epoch,
-                        use_multiprocessing=False,
-                        epochs=self.epochs,
-                        callbacks=callbacks,
-                        workers=4,)
+        history = self._model.fit(self.train_gen,
+                                  steps_per_epoch=self._steps_per_epoch,
+                                  use_multiprocessing=False,
+                                  epochs=self.epochs,
+                                  callbacks=callbacks,
+                                  workers=4,)
+
+        # save train stats
+        log_info("Finished training")
+        self.model.save_weights(self._save_dir + '/model_final.h5')
+        self._save_train_history(history)
 
     def mi_loss(self, y_true, y_pred):
         """
@@ -209,7 +243,6 @@ class IIC_clustering:
         @brief Evaluate the accuracy of the current model weights
         """
         y_pred = self._model.predict(self.x_test)
-        print("")
         # accuracy per head
         for head in range(self._heads):
             if self._heads == 1:
@@ -273,6 +306,13 @@ class IIC_clustering:
     @property
     def model(self):
         return self._model
+
+    def _save_train_history(self, history):
+        """
+        Saved keras fit fucntion history
+        """
+        with open(os.path.join(os.path.realpath(self._save_dir), 'iic_train_history_' + datetime.today().strftime('%Y-%m-%d')), 'bw+') as history_file:
+            pickle.dump(history.history, history_file)
 
 
 error_msg = {
