@@ -22,7 +22,8 @@ class IIC_clustering:
                  crop_image: int = 4,
                  input_shape: Tuple = (28, 28, 3),
                  CNN_base: str = 'ResNet',
-                 mnist: bool = False,):
+                 mnist: bool = False,
+                 aux_cluster=True):
         """
         @brief Contains the encoder model, the loss function,
             loading of datasets, train and evaluation routines
@@ -37,6 +38,7 @@ class IIC_clustering:
         @param input_shape original input shape of the data. The image will size will be reduced if value for crop_image > 0.
         @param CNN_base base CNN to create feature space. Values: 'Vgg', 'ResNet'
         @param mnist Do we train on mnist dataset. If yes, keras data can be used to evaluate accuracy
+        @param aux_cluster enable auxiliary clustering layer
         """
         self._model = None
         self.x_test = None
@@ -52,14 +54,17 @@ class IIC_clustering:
         self._class_list = class_list
         self._z_dimension = z_dimension
         self._cnn_base = CNN_base
-        self.mnsit = mnist
+        self._mnsit = mnist
+        self._aux_cluster = aux_cluster
+
+        assert self._mnsit != self._aux_cluster, error_msg['AuxCluster']
 
         self.compute_image_size(input_shape)
         self.train_gen = IIC_ImageDataGenerator(
-            self._path, self._class_list, heads=self._heads, batch_size=self._batch_size, image_size=self._uncroped_image_size, crop_image=self._crop_image)
+            self._path, self._class_list, heads=self._heads if not self._aux_cluster else self._heads+1, batch_size=self._batch_size, image_size=self._uncroped_image_size, crop_image=self._crop_image)
         self.build_model()
 
-        if self.mnsit:
+        if self._mnsit:
             self.load_mnist_eval_dataset()
 
         self._steps_per_epoch = self.train_gen.get_dataset_size(
@@ -70,7 +75,6 @@ class IIC_clustering:
         @brief Build the n_heads of the IIC model
         """
         # construct CNN model
-        # vgg.VGG(vgg.cfg['F'], self._input_shape).model
         self.CNN = self.build_base_model()
         inputs = keras.layers.Input(shape=self._input_shape, name='x')
         x = self.CNN(inputs)
@@ -83,6 +87,13 @@ class IIC_clustering:
             outputs.append(keras.layers.Dense(self._z_dimension,
                                               activation='softmax',
                                               name=name)(x))
+        #add aux layer
+        if self._aux_cluster:
+            name = "aux_cluster_layer"
+            outputs.append(keras.layers.Dense(self._z_dimension*3,
+                                              activation='softmax',
+                                              name=name)(x))
+                                              
         self._model = keras.models.Model([inputs], outputs, name='IIC')
         optimizer = keras.optimizers.Adam(lr=1e-3)
         self._model.compile(optimizer=optimizer, loss=self.mi_loss)
@@ -124,7 +135,7 @@ class IIC_clustering:
             for layer in base_model.layers:
                 if "conv_dw_9" in layer.name:
                     break
-                layer.trainable = False 
+                layer.trainable = False
             return base_model
         else:
             raise NameError('Unknown CNN model')
@@ -137,18 +148,18 @@ class IIC_clustering:
         """
         lr_scheduler = keras.callbacks.LearningRateScheduler(lr_schedule,
                                                              verbose=1)
-        if self.mnsit:
+        if self._mnsit:
             accuracy = AccuracyCallback(self)
             callbacks = [accuracy, lr_scheduler]
         else:
             callbacks = [lr_scheduler]
 
         self._model.fit(self.train_gen,
-                                  steps_per_epoch=self._steps_per_epoch,
-                                  use_multiprocessing=False,
-                                  epochs=self.epochs,
-                                  callbacks=callbacks,
-                                  workers=4,)
+                        steps_per_epoch=self._steps_per_epoch,
+                        use_multiprocessing=False,
+                        epochs=self.epochs,
+                        callbacks=callbacks,
+                        workers=4,)
 
     def mi_loss(self, y_true, y_pred):
         """
@@ -284,4 +295,5 @@ error_msg = {
     'ResNetShape': "Image shape has to be >200,200 for ResNet. Do not forget that cropping does reduce image size",
     'large_crop': "Crop size is larger than inuput shape",
     'MiniNet': "Image shape has to be >200,200 for MobileNet. Do not forget that cropping does reduce image size",
+    'AuxCluster': "Can't evaluate mnist when unsing auxiliary cluster"
 }
