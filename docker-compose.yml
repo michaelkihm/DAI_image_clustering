@@ -1,0 +1,13 @@
+version: '3.5'
+
+services:
+  image_clustering:
+    container_name: image_clustering_container
+    build:
+      context: ./docker
+      network: host
+    volumes:
+      - /home/michael/Dropbox/Invariant_Information_Clustering/:/home
+      - /home/michael/Downloads/mnist/mnist_png/training:/home/images
+
+      #sudo docker run -v /home/michael/Dropbox/Invariant_Information_Clustering/:/home -v /home/michael/Downloads/mnist/mnist_png/training:/home/images -v /home/michael/Dropbox/Invariant_Information_Clustering/save_dir:/save_dir iic 
